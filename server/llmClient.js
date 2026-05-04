@@ -1,0 +1,136 @@
+const jsonHeaders = {
+  "Content-Type": "application/json"
+};
+
+const providers = {
+  openrouter: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKeyName: "OPENROUTER_API_KEY",
+    modelName: "OPENROUTER_MODEL",
+    defaultModel: "openai/gpt-4o-mini"
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyName: "OPENAI_API_KEY",
+    modelName: "OPENAI_MODEL",
+    defaultModel: "gpt-4o-mini"
+  },
+  compatible: {
+    baseUrl: "http://localhost:1234/v1",
+    apiKeyName: "OPENAI_API_KEY",
+    modelName: "OPENAI_MODEL",
+    defaultModel: "local-model"
+  }
+};
+
+function stripCodeFence(value) {
+  return value
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function buildConfig(env) {
+  const provider = env.LLM_PROVIDER || (env.OPENROUTER_API_KEY ? "openrouter" : "compatible");
+  const providerConfig = providers[provider] || providers.compatible;
+  const baseUrl = provider === "openrouter"
+    ? env.OPENROUTER_BASE_URL || providerConfig.baseUrl
+    : env.OPENAI_BASE_URL || providerConfig.baseUrl;
+  const apiKey = env[providerConfig.apiKeyName] || env.OPENAI_API_KEY || "";
+  const model = env[providerConfig.modelName] || env.OPENAI_MODEL || providerConfig.defaultModel;
+  const enabled = env.LLM_ENABLED === "true" && Boolean(apiKey);
+  const timeoutMs = Number(env.LLM_TIMEOUT_MS || 12000);
+  const reasoningEffort = env.LLM_REASONING_EFFORT || (provider === "openrouter" ? "low" : "");
+
+  return {
+    enabled,
+    provider,
+    baseUrl,
+    apiKey,
+    model,
+    reasoningEffort,
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 12000
+  };
+}
+
+function attributionHeaders(env, provider) {
+  if (provider !== "openrouter") {
+    return {};
+  }
+
+  return {
+    ...(env.OPENROUTER_SITE_URL ? { "HTTP-Referer": env.OPENROUTER_SITE_URL } : {}),
+    ...(env.OPENROUTER_APP_NAME ? { "X-OpenRouter-Title": env.OPENROUTER_APP_NAME } : {})
+  };
+}
+
+function timeoutAfter(ms) {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`LLM request timed out after ${ms}ms`)), ms);
+  });
+}
+
+function buildRequestBody(config, messages, schemaHint) {
+  return {
+    model: config.model,
+    temperature: 0.2,
+    ...(config.reasoningEffort ? { reasoning: { effort: config.reasoningEffort } } : {}),
+    messages: [
+      {
+        role: "system",
+        content: `Return only compact JSON. ${schemaHint}`
+      },
+      ...messages
+    ]
+  };
+}
+
+export function createLlmClient(env = process.env) {
+  const config = buildConfig(env);
+
+  async function chatJson(messages, schemaHint) {
+    if (!config.enabled) {
+      return null;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+
+    const request = fetch(`${config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        ...jsonHeaders,
+        ...attributionHeaders(env, config.provider),
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(buildRequestBody(config, messages, schemaHint))
+    });
+
+    const response = await Promise.race([
+      request.finally(() => clearTimeout(timeout)),
+      timeoutAfter(config.timeoutMs).finally(() => controller.abort())
+    ]);
+
+    if (!response.ok) {
+      throw new Error(`LLM request failed: ${response.status}`);
+    }
+
+    const body = await response.json();
+    const content = body.choices?.[0]?.message?.content;
+    if (!content) {
+      return null;
+    }
+
+    return JSON.parse(stripCodeFence(content));
+  }
+
+  return {
+    enabled: config.enabled,
+    provider: config.provider,
+    model: config.model,
+    reasoningEffort: config.reasoningEffort,
+    chatJson
+  };
+}
