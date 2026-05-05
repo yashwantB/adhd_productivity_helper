@@ -48,27 +48,34 @@ export function createDb(env = process.env) {
   async function ensureSchema() {
     if (!sql) return;
     if (!readyPromise) {
-      readyPromise = sql`
-        create table if not exists focusmate_users (
-          id text primary key,
-          email text unique not null,
-          name text not null,
-          password_hash text not null default '',
-          created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
-        );
-        create table if not exists focusmate_threads (
-          id text primary key,
-          user_id text not null references focusmate_users(id) on delete cascade,
-          title text not null,
-          preview text not null,
-          messages jsonb not null,
-          session jsonb,
-          created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
-        );
-        alter table focusmate_users add column if not exists password_hash text not null default '';
-      `;
+      readyPromise = (async () => {
+        await sql`
+          create table if not exists focusmate_users (
+            id text primary key,
+            email text unique not null,
+            name text not null,
+            password_hash text not null default '',
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now()
+          )
+        `;
+        await sql`
+          create table if not exists focusmate_threads (
+            id text primary key,
+            user_id text not null references focusmate_users(id) on delete cascade,
+            title text not null,
+            preview text not null,
+            messages jsonb not null,
+            session jsonb,
+            created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now()
+          )
+        `;
+        await sql`
+          alter table focusmate_users
+          add column if not exists password_hash text not null default ''
+        `;
+      })();
     }
     await readyPromise;
   }
