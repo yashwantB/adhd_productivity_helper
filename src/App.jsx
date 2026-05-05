@@ -3,6 +3,7 @@ import {
   Check,
   CirclePause,
   CornerDownLeft,
+  Github,
   Loader2,
   LogOut,
   Minus,
@@ -41,9 +42,9 @@ const ENERGY_LEVELS = [
 ];
 
 const STARTER_PROMPTS = [
-  "Help me choose the smallest useful next action.",
-  "I fell off. Help me restart.",
-  "This feels too big. Shrink it."
+  "I keep avoiding this assignment. Give me the first 2-minute step.",
+  "I got distracted and lost my place. Help me restart.",
+  "My task feels too big. Shrink it into one tiny action."
 ];
 
 const QUICK_ACTIONS = [
@@ -81,24 +82,6 @@ const PUBLIC_PAGES = {
       ["Use", "Focusmate is a planning and focus assistant, not professional, medical, legal, or academic advice."],
       ["Availability", "AI and database providers may be unavailable, rate limited, or return imperfect responses."],
       ["Responsibility", "Users are responsible for reviewing outputs before acting on them. Replace this with formal terms before launch."]
-    ]
-  },
-  security: {
-    title: "Security",
-    intro: "How the current development build thinks about storage and access.",
-    sections: [
-      ["Database", "When DATABASE_URL is set, account and thread data are written to Neon Postgres. Otherwise local fallback is used."],
-      ["Secrets", "API keys and database URLs belong in environment variables, never in client-side code."],
-      ["Passwords", "Passwords are salted and hashed before storage. Production still needs full auth/session hardening."]
-    ]
-  },
-  contact: {
-    title: "Contact",
-    intro: "A simple support surface for product questions, bug reports, and data requests.",
-    sections: [
-      ["Support", "Add a support email or helpdesk link here before launch."],
-      ["Data requests", "Use this page for account export, deletion, or privacy requests once operational processes exist."],
-      ["Feedback", "The fastest useful report includes what you tried, what happened, and what you expected."]
     ]
   }
 };
@@ -315,39 +298,96 @@ function LandingPage({ apiHealth, onGetStarted, onLogin, onNavigate }) {
           ))}
         </nav>
         <div className="landing-account-actions">
+          <a
+            className="github-link"
+            href="https://github.com/yashwantB/adhd_productivity_helper"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <Github size={17} aria-hidden="true" />
+            <span>GitHub</span>
+          </a>
           <button type="button" onClick={onLogin}>Login</button>
           <button type="button" onClick={onGetStarted}>Sign up</button>
         </div>
       </header>
 
-      <div className="landing-main">
-        <div className="landing-copy">
-          <h1>One next move. Then another.</h1>
-          <p>
-            A dark, low-friction focus assistant that turns messy tasks into a small action,
-            keeps your place, and remembers the thread.
-          </p>
-          <div className="landing-actions">
-            <button className="landing-primary" type="button" onClick={onGetStarted}>
-              Get started
-            </button>
+      <div className="landing-scroll">
+        <div className="landing-main">
+          <div className="landing-copy">
+            <h1>One next move. Then another.</h1>
+            <p>
+              A dark, low-friction focus assistant that turns messy tasks into a small action,
+              keeps your place, and remembers the thread.
+            </p>
+            <div className="landing-actions">
+              <button className="landing-primary" type="button" onClick={onGetStarted}>
+                Get started
+              </button>
+            </div>
+          </div>
+
+          <div className="landing-preview" aria-hidden="true">
+            <div>
+              <span>Current focus</span>
+              <strong>Open the document and write the rough title.</strong>
+            </div>
+            <div>
+              <span>Energy</span>
+              <strong>Low, distracted, restart-friendly</strong>
+            </div>
+            <div>
+              <span>Storage</span>
+              <strong>{dbStatus}</strong>
+            </div>
           </div>
         </div>
 
-        <div className="landing-preview" aria-hidden="true">
-          <div>
-            <span>Current focus</span>
-            <strong>Write one sentence that starts the assignment.</strong>
+        <section className="landing-flow" aria-label="Product flow">
+          {[
+            ["Start", "Drop in the messy task without organizing it first."],
+            ["Narrow", "The assistant turns overwhelm into one action sized for your energy."],
+            ["Return", "Saved threads keep the restart point when attention wanders."]
+          ].map(([title, body], index) => (
+            <article style={{ "--delay": `${index * 80}ms` }} key={title}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <h2>{title}</h2>
+              <p>{body}</p>
+            </article>
+          ))}
+        </section>
+
+        <section className="landing-product" aria-label="Product preview">
+          <div className="product-thread">
+            <div className="product-row">
+              <span>You</span>
+              <p>I have to study, but I keep opening random tabs instead.</p>
+            </div>
+            <div className="product-row assistant-row">
+              <span>Focusmate</span>
+              <p>Close one tab, open the notes, and read only the first heading. Stop there.</p>
+            </div>
+            <div className="product-controls">
+              <button type="button">Low</button>
+              <button type="button">Done</button>
+              <button type="button">Stuck</button>
+            </div>
           </div>
-          <div>
-            <span>Energy</span>
-            <strong>Medium</strong>
+          <div className="product-copy">
+            <h2>Built for the first two minutes.</h2>
+            <p>
+              The interface stays quiet: energy is visible, deeper controls move into settings,
+              and history lives where chat products normally put it.
+            </p>
           </div>
-          <div>
-            <span>Storage</span>
-            <strong>{dbStatus}</strong>
-          </div>
-        </div>
+        </section>
+
+        <section className="landing-final" aria-label="Create account">
+          <h2>Make a place you can come back to.</h2>
+          <button className="landing-primary" type="button" onClick={onGetStarted}>
+            Sign up
+          </button>
+        </section>
       </div>
     </section>
   );
