@@ -2,6 +2,8 @@
 
 Small full-stack ADHD focus assistant that turns vague or stalled work into one next action, tracks session progress, nudges after inactivity, and helps the user recover without shame.
 
+Live app: https://focusmate-ry55.onrender.com
+
 The product surface is intentionally narrow: current task, next step, quick recovery controls, energy level, conversation history, and a small parking lot for side tasks. The assistant loop is built around starting, shrinking, resuming, switching, and saving a breadcrumb for the next restart.
 
 ## Run
@@ -14,6 +16,33 @@ npm run dev
 App: `http://localhost:5173`
 
 Backend: `http://localhost:8787`
+
+## Deployment
+
+The production app is deployed on Render:
+
+```text
+https://focusmate-ry55.onrender.com
+```
+
+Render runs the Express server with `npm start`. During deployment, the service builds the Vite frontend with `npm run build`, and the backend serves the compiled `dist` files alongside the `/api` routes.
+
+Required production environment variables:
+
+```bash
+NODE_ENV=production
+CLIENT_ORIGIN=https://focusmate-ry55.onrender.com
+DATABASE_URL=postgresql://...
+LLM_PROVIDER=openrouter
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=sk-or-your-key
+OPENROUTER_MODEL=tencent/hy3-preview:free
+OPENROUTER_SITE_URL=https://focusmate-ry55.onrender.com
+OPENROUTER_APP_NAME=Focusmate
+LLM_REASONING_EFFORT=low
+LLM_TIMEOUT_MS=25000
+LLM_ENABLED=true
+```
 
 ## LLM Setup
 
