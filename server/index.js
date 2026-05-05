@@ -1,14 +1,18 @@
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { createAssistantEngine } from "./assistantEngine.js";
 import { createDb } from "./db.js";
 import { createLlmClient } from "./llmClient.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(process.env.PORT || 8787);
 const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+const distPath = path.join(__dirname, "..", "dist");
 
 const llm = createLlmClient(process.env);
 const assistant = createAssistantEngine({ llm });
@@ -153,6 +157,13 @@ app.post("/api/timeout", (request, response) => {
 app.post("/api/reset", (_request, response) => {
   response.json(assistant.reset());
 });
+
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(distPath));
+  app.get("*", (_request, response) => {
+    response.sendFile(path.join(distPath, "index.html"));
+  });
+}
 
 app.use((error, _request, response, _next) => {
   if (error instanceof z.ZodError) {
