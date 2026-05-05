@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import { z } from "zod";
 import { createAssistantEngine } from "./assistantEngine.js";
+import { createDb } from "./db.js";
 import { createLlmClient } from "./llmClient.js";
 
 const app = express();
@@ -11,6 +12,7 @@ const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
 const llm = createLlmClient(process.env);
 const assistant = createAssistantEngine({ llm });
+const db = createDb(process.env);
 
 app.use(cors({ origin: clientOrigin }));
 app.use(express.json());
@@ -21,8 +23,77 @@ app.get("/api/health", (_request, response) => {
     llmEnabled: llm.enabled,
     llmProvider: llm.provider,
     llmModel: llm.model,
-    llmReasoningEffort: llm.reasoningEffort || null
+    llmReasoningEffort: llm.reasoningEffort || null,
+    databaseProvider: db.provider,
+    databaseEnabled: db.enabled
   });
+});
+
+app.post("/api/auth/signup", async (request, response, next) => {
+  try {
+    const body = z.object({
+      email: z.string().email(),
+      name: z.string().min(1).max(80),
+      password: z.string().min(6).max(128)
+    }).parse(request.body);
+    response.json({ user: await db.signup(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/login", async (request, response, next) => {
+  try {
+    const body = z.object({
+      email: z.string().email(),
+      password: z.string().min(6).max(128)
+    }).parse(request.body);
+    response.json({ user: await db.login(body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/threads", async (request, response, next) => {
+  try {
+    const userId = z.string().min(1).parse(request.header("x-user-id"));
+    response.json({ threads: await db.listThreads(userId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/threads/:id", async (request, response, next) => {
+  try {
+    const userId = z.string().min(1).parse(request.header("x-user-id"));
+    const body = z.object({
+      id: z.string().min(1),
+      title: z.string(),
+      preview: z.string(),
+      messages: z.array(z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string(),
+        at: z.number().optional(),
+        mode: z.string().optional(),
+        energy: z.string().optional()
+      })),
+      session: z.unknown().nullable().optional(),
+      createdAt: z.string().optional()
+    }).parse({ ...request.body, id: request.params.id });
+    response.json({ thread: await db.upsertThread(userId, body) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/threads/:id", async (request, response, next) => {
+  try {
+    const userId = z.string().min(1).parse(request.header("x-user-id"));
+    await db.deleteThread(userId, request.params.id);
+    response.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/session", (_request, response) => {
@@ -86,6 +157,16 @@ app.post("/api/reset", (_request, response) => {
 app.use((error, _request, response, _next) => {
   if (error instanceof z.ZodError) {
     response.status(400).json({ error: "Invalid request", details: error.flatten() });
+    return;
+  }
+
+  if (error.message === "Invalid email or password") {
+    response.status(401).json({ error: error.message });
+    return;
+  }
+
+  if (error.message === "Account already exists") {
+    response.status(409).json({ error: error.message });
     return;
   }
 
