@@ -42,6 +42,38 @@ app.post("/api/message", async (request, response, next) => {
   }
 });
 
+app.post("/api/message/stream", async (request, response, next) => {
+  try {
+    const body = z.object({
+      message: z.string(),
+      mode: z.enum(["start", "shrink", "unstuck", "sprint", "body", "resume", "switch", "shutdown"]).optional(),
+      energy: z.enum(["low", "medium", "high"]).optional()
+    }).parse(request.body);
+
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+
+    for await (const event of assistant.handleMessageStream(body.message, body.mode, body.energy)) {
+      response.write(`event: ${event.type}\n`);
+      response.write(`data: ${JSON.stringify(event.type === "delta" || event.type === "thinking" ? event.content : event.data)}\n\n`);
+    }
+
+    response.write("event: done\ndata: true\n\n");
+    response.end();
+  } catch (error) {
+    if (response.headersSent) {
+      response.write(`event: error\ndata: ${JSON.stringify(error.message || "Stream failed")}\n\n`);
+      response.end();
+      return;
+    }
+    next(error);
+  }
+});
+
 app.post("/api/timeout", (request, response) => {
   const minutes = Number(request.body?.minutes || 3);
   response.json(assistant.handleTimeout(minutes));

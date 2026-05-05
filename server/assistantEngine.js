@@ -71,16 +71,16 @@ export function createAssistantEngine({ llm }) {
       return assistantReply("What’s the smallest thing you can do right now?");
     }
 
-    session.mode = normalizeMode(rawMode);
-    session.energy = normalizeEnergy(rawEnergy);
-    session.lastMessageAt = Date.now();
-    session.history.push({
-      role: "user",
-      content: message,
-      mode: session.mode,
-      energy: session.energy,
-      at: session.lastMessageAt
-    });
+    recordUserMessage(message, rawMode, rawEnergy);
+
+    if (llm?.enabled) {
+      try {
+        const reply = await llm.chatText(buildFlowMessages(message));
+        return finalizeLlmReply(reply, message);
+      } catch {
+        return continueFallbackFlow(message);
+      }
+    }
 
     const intent = classifyInput(message);
 
@@ -115,6 +115,212 @@ export function createAssistantEngine({ llm }) {
     }
 
     return startTask(message, session.mode, session.energy);
+  }
+
+  async function* handleMessageStream(rawMessage, rawMode = "start", rawEnergy = "medium") {
+    const message = normalizeMessage(rawMessage);
+    if (!message) {
+      const emptyReply = assistantReply("What’s the smallest thing you can do right now?");
+      yield { type: "final", data: emptyReply };
+      return;
+    }
+
+    recordUserMessage(message, rawMode, rawEnergy);
+
+    if (!llm?.enabled) {
+      const fallback = await continueFallbackFlow(message);
+      yield { type: "delta", content: fallback.reply };
+      yield { type: "final", data: fallback };
+      return;
+    }
+
+    try {
+      let reply = "";
+      for await (const chunk of llm.chatTextStream(buildFlowMessages(message))) {
+        if (chunk.type === "thinking") {
+          yield { type: "thinking", content: chunk.content };
+          continue;
+        }
+
+        reply += chunk.content;
+        yield { type: "delta", content: chunk.content };
+      }
+
+      const final = finalizeStreamedLlmReply(reply, message);
+      yield { type: "final", data: final };
+    } catch {
+      const fallback = await continueFallbackFlow(message);
+      yield { type: "delta", content: fallback.reply };
+      yield { type: "final", data: fallback };
+    }
+  }
+
+  function recordUserMessage(message, rawMode, rawEnergy) {
+    session.mode = normalizeMode(rawMode);
+    session.energy = normalizeEnergy(rawEnergy);
+    session.lastMessageAt = Date.now();
+    session.history.push({
+      role: "user",
+      content: message,
+      mode: session.mode,
+      energy: session.energy,
+      at: session.lastMessageAt
+    });
+  }
+
+  async function continueFallbackFlow(message) {
+    const intent = classifyInput(message);
+
+    if (intent.kind === "end") return endSession();
+    if (intent.kind === "reset") {
+      resetCurrentStep();
+      session.state = "working";
+      return assistantReply(`Reset done. ${capitalize(session.currentStep || smallestFallback())}.`);
+    }
+    if (intent.kind === "progress") {
+      return intent.done ? completeCurrentStep() : handleState("stuck");
+    }
+    if (intent.kind === "state") return handleState(intent.state);
+    if (session.mode === "resume" && session.currentStep) {
+      session.state = "working";
+      return assistantReply(`Resume here: ${session.currentStep}.`);
+    }
+    return startTask(message, session.mode, session.energy);
+  }
+
+  function buildFlowMessages(message) {
+    return [
+      {
+        role: "system",
+        content:
+          "You are Focusmate, a concise ADHD-friendly focus assistant. You own the flow: infer whether the user is starting, done, stuck, distracted, switching, or wrapping up from the conversation. Do not follow a fixed script. Give one useful next move and optionally one short reason. Keep it natural, specific to the user's task, and under 45 words. Avoid shame, overplanning, lists, and generic productivity slogans."
+      },
+      {
+        role: "user",
+        content: `Current session JSON:\n${JSON.stringify(snapshotForLlm())}`
+      },
+      ...session.history.slice(-10).map((entry) => ({
+        role: entry.role,
+        content: entry.content
+      })),
+      {
+        role: "user",
+        content: `Mode: ${session.mode}. Energy: ${session.energy}. Latest user message: ${message}`
+      }
+    ];
+  }
+
+  function snapshotForLlm() {
+    return {
+      mode: session.mode,
+      energy: session.energy,
+      state: session.state,
+      activeTask: session.activeTask,
+      currentStep: session.currentStep,
+      breadcrumb: session.breadcrumb,
+      remainingSteps: session.remainingSteps,
+      completedSteps: session.completedSteps,
+      stepsSinceBreak: session.stepsSinceBreak,
+      successStreak: session.successStreak,
+      failuresInRow: session.failuresInRow
+    };
+  }
+
+  async function finalizeLlmReply(rawReply, latestUserMessage) {
+    const content = normalizeMessage(rawReply) || "I’m here. Tell me what changed, and I’ll choose the next move.";
+    await updateSessionFromLlm(latestUserMessage, content);
+    session.lastReplyAt = Date.now();
+    session.history.push({ role: "assistant", content, at: session.lastReplyAt });
+    return {
+      reply: content,
+      session: snapshot()
+    };
+  }
+
+  function finalizeStreamedLlmReply(rawReply, latestUserMessage) {
+    const content = normalizeMessage(rawReply) || "I’m here. Tell me what changed, and I’ll choose the next move.";
+    applyLocalSessionUpdate(latestUserMessage, content);
+    session.lastReplyAt = Date.now();
+    session.history.push({ role: "assistant", content, at: session.lastReplyAt });
+    return {
+      reply: content,
+      session: snapshot()
+    };
+  }
+
+  async function updateSessionFromLlm(latestUserMessage, assistantReplyText) {
+    try {
+      const parsed = await llm?.chatJson(
+        [
+          {
+            role: "user",
+            content:
+              `Update this focus session from the latest exchange. Let the assistant reply drive the next step; do not use any predefined workflow.\nCurrent session: ${JSON.stringify(snapshotForLlm())}\nLatest user: ${latestUserMessage}\nAssistant reply: ${assistantReplyText}`
+          }
+        ],
+        'Schema: {"state":"idle|working|stuck|distracted|break|switching","activeTask":"task or null","currentStep":"single next step or null","breadcrumb":"restart note or null","remainingSteps":["optional upcoming steps"],"completedSteps":["completed steps"],"progressDelta":"none|completed|reset"}'
+      );
+
+      applyLlmSessionUpdate(parsed, latestUserMessage, assistantReplyText);
+    } catch {
+      applyLocalSessionUpdate(latestUserMessage, assistantReplyText);
+    }
+  }
+
+  function applyLlmSessionUpdate(parsed, latestUserMessage, assistantReplyText) {
+    const state = cleanTask(parsed?.state);
+    if (["idle", "working", "stuck", "distracted", "break", "switching"].includes(state)) {
+      session.state = state;
+    } else {
+      session.state = "working";
+    }
+
+    const task = cleanTask(parsed?.activeTask) || session.activeTask || inferTask(latestUserMessage);
+    const step = cleanTask(parsed?.currentStep) || inferStep(assistantReplyText) || session.currentStep;
+
+    session.activeTask = task || null;
+    session.currentStep = step || null;
+    session.breadcrumb = cleanTask(parsed?.breadcrumb) || (step ? `Next time: ${step}.` : session.breadcrumb);
+    session.remainingSteps = Array.isArray(parsed?.remainingSteps)
+      ? parsed.remainingSteps.map(cleanTask).filter(Boolean).slice(0, 8)
+      : [];
+    session.completedSteps = Array.isArray(parsed?.completedSteps)
+      ? parsed.completedSteps.map(cleanTask).filter(Boolean).slice(0, 20)
+      : session.completedSteps;
+
+    if (parsed?.progressDelta === "completed") {
+      session.stepsSinceBreak += 1;
+      session.successStreak += 1;
+      session.failuresInRow = 0;
+    } else if (session.state === "stuck" || session.state === "distracted") {
+      session.failuresInRow += 1;
+      session.successStreak = 0;
+    }
+
+    if (task && !session.memory.activeTasks.includes(task)) {
+      session.memory.activeTasks.push(task);
+    }
+  }
+
+  function applyLocalSessionUpdate(latestUserMessage, assistantReplyText) {
+    const intent = classifyInput(latestUserMessage);
+    if (intent.kind === "progress" && intent.done && session.currentStep) {
+      session.completedSteps.push(session.currentStep);
+      session.successStreak += 1;
+      session.failuresInRow = 0;
+    } else if (intent.kind === "state") {
+      session.state = intent.state;
+    } else {
+      session.state = "working";
+    }
+
+    session.activeTask = session.activeTask || inferTask(latestUserMessage);
+    session.currentStep = inferStep(assistantReplyText) || session.currentStep || latestUserMessage;
+    session.breadcrumb = session.currentStep ? `Next time: ${session.currentStep}.` : session.breadcrumb;
+
+    if (session.activeTask && !session.memory.activeTasks.includes(session.activeTask)) {
+      session.memory.activeTasks.push(session.activeTask);
+    }
   }
 
   async function startTask(message, mode = "start", energy = "medium") {
@@ -358,6 +564,7 @@ export function createAssistantEngine({ llm }) {
   return {
     snapshot,
     handleMessage,
+    handleMessageStream,
     handleTimeout,
     reset
   };
@@ -578,6 +785,34 @@ function normalizeEnergy(value) {
 
 function cleanTask(value) {
   return normalizeMessage(value).replace(/[.!?]+$/g, "");
+}
+
+function inferTask(message) {
+  const cleaned = cleanTask(message);
+  if (!cleaned) return null;
+  if (/^(done|finished|complete|completed|did it|stuck|distracted|break|too big|switch)$/i.test(cleaned)) {
+    return null;
+  }
+  return cleaned;
+}
+
+function inferStep(reply) {
+  const cleaned = normalizeMessage(reply);
+  if (!cleaned) return null;
+
+  const patterns = [
+    /\b(?:next|first|start(?: here)?|do this|try this|move):\s*([^.!?]+)/i,
+    /\b(?:open|write|read|send|make|choose|pick|set|type|save|close|find|name|ask|draft|review)\b[^.!?]*/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleaned.match(pattern);
+    if (match) {
+      return cleanTask(match[1] || match[0]);
+    }
+  }
+
+  return cleanTask(cleaned.split(/[.!?]/)[0]);
 }
 
 function capitalize(value) {

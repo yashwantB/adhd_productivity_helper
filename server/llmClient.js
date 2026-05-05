@@ -86,6 +86,27 @@ function buildRequestBody(config, messages, schemaHint) {
   };
 }
 
+function buildTextRequestBody(config, messages, stream = false) {
+  return {
+    model: config.model,
+    temperature: 0.45,
+    stream,
+    ...(config.reasoningEffort ? { reasoning: { effort: config.reasoningEffort } } : {}),
+    messages
+  };
+}
+
+function extractStreamParts(payload) {
+  return payload.choices
+    ?.map((choice) => {
+      const delta = choice.delta || choice.message || {};
+      return {
+        content: delta.content || "",
+        thinking: delta.reasoning || delta.reasoning_content || delta.thinking || ""
+      };
+    }) || [];
+}
+
 export function createLlmClient(env = process.env) {
   const config = buildConfig(env);
 
@@ -126,11 +147,105 @@ export function createLlmClient(env = process.env) {
     return JSON.parse(stripCodeFence(content));
   }
 
+  async function chatText(messages) {
+    if (!config.enabled) {
+      return "";
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+
+    const request = fetch(`${config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        ...jsonHeaders,
+        ...attributionHeaders(env, config.provider),
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(buildTextRequestBody(config, messages))
+    });
+
+    const response = await Promise.race([
+      request.finally(() => clearTimeout(timeout)),
+      timeoutAfter(config.timeoutMs).finally(() => controller.abort())
+    ]);
+
+    if (!response.ok) {
+      throw new Error(`LLM request failed: ${response.status}`);
+    }
+
+    const body = await response.json();
+    return body.choices?.[0]?.message?.content || "";
+  }
+
+  async function* chatTextStream(messages) {
+    if (!config.enabled) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+
+    const response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        ...jsonHeaders,
+        ...attributionHeaders(env, config.provider),
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify(buildTextRequestBody(config, messages, true))
+    }).finally(() => clearTimeout(timeout));
+
+    if (!response.ok) {
+      throw new Error(`LLM request failed: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+
+      for (const part of parts) {
+        for (const line of part.split("\n")) {
+          const clean = line.trim();
+          if (!clean.startsWith("data:")) continue;
+
+          const data = clean.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+
+          for (const part of extractStreamParts(JSON.parse(data))) {
+            if (part.thinking) {
+              yield { type: "thinking", content: part.thinking };
+            }
+            if (part.content) {
+              yield { type: "delta", content: part.content };
+            }
+          }
+        }
+      }
+    }
+  }
+
   return {
     enabled: config.enabled,
     provider: config.provider,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
-    chatJson
+    chatJson,
+    chatText,
+    chatTextStream
   };
 }
